@@ -87,7 +87,7 @@ pipeline {
         }
         failure {
             echo ":x: Pipeline FAILED - Check logs for errors"
-            slackSend channel: '#builds', message: "Build ${env.BUILD_NUMBER} failed!"
+           // slackSend channel: '#builds', message: "Build ${env.BUILD_NUMBER} failed!"
         }
         always {
             // Clean up workspace
