@@ -6,77 +6,72 @@ pipeline {
     }
 
     environment {
-        // Safe PATH configuration that won't fail
+        // Universal Docker access
+        DOCKER_CMD = "/usr/bin/env docker"
         PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
 
-        // Docker image configuration
+        // Project configuration
         MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
         DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
     }
 
     stages {
-        stage('Environment Setup') {
+        stage('Checkout Code') {
             steps {
-                script {
-                    // Safe Docker detection that never fails
-                    def dockerPath = sh(script: '''
-                        [ -x "/usr/local/bin/docker" ] && echo "/usr/local/bin/docker" || \
-                        [ -x "/opt/homebrew/bin/docker" ] && echo "/opt/homebrew/bin/docker" || \
-                        command -v docker || echo "docker_not_found"
-                    ''', returnStdout: true).trim()
-
-                    if (dockerPath == "docker_not_found") {
-                        echo "⚠️ WARNING: Docker not found in standard locations"
-                        // Continue pipeline but skip Docker stages
-                        env.SKIP_DOCKER = "true"
-                    } else {
-                        env.DOCKER_CMD = dockerPath
-                        echo "✅ Using Docker at: ${env.DOCKER_CMD}"
-                    }
-                }
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    extensions: [
+                        [$class: 'CleanCheckout'],
+                        [$class: 'CloneOption', depth: 1, shallow: true]
+                    ],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/your-username/your-repo.git',
+                        credentialsId: 'your-github-credentials'
+                    ]]
+                ])
+                // Verify checkout succeeded
+                sh 'ls -la'
             }
         }
 
         stage('Build & Test') {
             steps {
                 sh 'mvn clean package'
-            }
-            post {
-                always {
-                    junit '**/target/surefire-reports/*.xml'
-                    archiveArtifacts 'target/*.jar'
-                }
+                junit '**/target/surefire-reports/*.xml'
+                archiveArtifacts 'target/*.jar'
             }
         }
 
         stage('Docker Operations') {
-            when {
-                expression { env.SKIP_DOCKER != "true" }
-            }
             steps {
                 script {
-                    try {
-                        // Build with verified Docker path
-                        sh "${env.DOCKER_CMD} build -t ${DOCKER_IMAGE}:${DOCKER_TAG} --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} ."
+                    // Verify Docker is available
+                    sh """
+                        if ! command -v docker >/dev/null 2>&1; then
+                            echo "ERROR: Docker not found in PATH: \$PATH"
+                            exit 1
+                        fi
 
-                        // Push with credentials
-                        docker.withRegistry('https://registry.hub.docker.com', 'docker-hub-creds') {
-                            docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
-                            docker.image("${DOCKER_IMAGE}:latest").push()
+                        ${DOCKER_CMD} build -t ${DOCKER_IMAGE}:${DOCKER_TAG} --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .
+
+                        withCredentials([usernamePassword(
+                            credentialsId: 'docker-hub-creds',
+                            usernameVariable: 'DOCKER_USER',
+                            passwordVariable: 'DOCKER_PASS'
+                        ]) {
+                            sh '''
+                                ${DOCKER_CMD} login -u \$DOCKER_USER -p \$DOCKER_PASS
+                                ${DOCKER_CMD} push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                                ${DOCKER_CMD} push ${DOCKER_IMAGE}:latest
+
+                                ${DOCKER_CMD} stop spring-boot-app || true
+                                ${DOCKER_CMD} rm spring-boot-app || true
+                                ${DOCKER_CMD} run -d --name spring-boot-app -p 8080:8080 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                            '''
                         }
-
-                        // Deploy with health check
-                        sh """
-                            ${env.DOCKER_CMD} stop spring-boot-app || true
-                            ${env.DOCKER_CMD} rm spring-boot-app || true
-                            ${env.DOCKER_CMD} run -d --name spring-boot-app -p 8080:8080 ${DOCKER_IMAGE}:${DOCKER_TAG}
-                        """
-                    } catch (Exception e) {
-                        echo "⚠️ WARNING: Docker operations failed - ${e.message}"
-                        // Mark as unstable instead of failing
-                        currentBuild.result = 'UNSTABLE'
-                    }
+                    """
                 }
             }
         }
@@ -84,42 +79,22 @@ pipeline {
 
     post {
         always {
-            script {
-                // Safe cleanup that cannot fail
-                sh '''
-                    # Clean build artifacts
-                    rm -rf target/* || echo "Cleanup warning: Failed to remove target files"
-
-                    # Docker cleanup if available
-                    if [ -n "${DOCKER_CMD}" ]; then
-                        ${DOCKER_CMD} system prune -f || echo "Cleanup warning: Docker prune failed"
-                    fi
-                '''
-            }
+            sh '''
+                # Safe cleanup
+                rm -rf target/* || echo "File cleanup warning"
+                ${DOCKER_CMD} system prune -f || echo "Docker cleanup warning"
+            '''
         }
-
         success {
             echo "✅ SUCCESS: Pipeline completed"
-            script {
-                if (env.SKIP_DOCKER == "true") {
-                    echo "⚠️ NOTE: Docker stages were skipped"
-                } else {
-                    echo "🐳 Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                }
-            }
+            echo "App running: http://localhost:8080"
+            echo "Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
         }
-
-        unstable {
-            echo "⚠️ UNSTABLE: Some non-critical operations failed"
-        }
-
         failure {
-            echo "❌ FAILURE: Critical build/test failures"
+            echo "❌ FAILURE: Check specific stage logs"
         }
     }
 }
-
-
 
 /*
 pipeline {
