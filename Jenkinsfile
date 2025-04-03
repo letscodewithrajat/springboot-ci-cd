@@ -3,37 +3,34 @@ pipeline {
     options {
         skipStagesAfterUnstable()
         timeout(time: 30, unit: 'MINUTES')
-        retry(1) // Single retry for whole pipeline
     }
 
     environment {
-        // Universal PATH configuration (works for both Intel and Apple Silicon)
-        PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        // Dynamic path resolution that always works
+        DOCKER_CMD = sh(script: '''
+            [ -x "/usr/local/bin/docker" ] && echo "/usr/local/bin/docker" || \
+            [ -x "/opt/homebrew/bin/docker" ] && echo "/opt/homebrew/bin/docker" || \
+            which docker || echo "docker"
+        ''', returnStdout: true).trim()
 
-        // Docker configuration
-        DOCKER_CMD = sh(script: 'command -v docker || echo /usr/local/bin/docker', returnStdout: true).trim()
+        PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
         MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
         DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
-
-        // Docker stability settings
-        DOCKER_HOST = "unix:///var/run/docker.sock"
-        DOCKER_BUILDKIT = "1"
     }
 
     stages {
-        stage('Environment Prep') {
+        stage('Environment Verification') {
             steps {
                 script {
-                    // Verify Docker exists and is responsive
+                    // Verify Docker is truly available
                     def dockerReady = sh(script: """
-                        ${DOCKER_CMD} --version || exit 1
-                        ${DOCKER_CMD} ps >/dev/null 2>&1 || exit 1
-                        echo "Using Docker at: ${DOCKER_CMD}"
+                        echo "Checking Docker at: ${DOCKER_CMD}"
+                        ${DOCKER_CMD} --version && ${DOCKER_CMD} ps
                     """, returnStatus: true) == 0
 
                     if (!dockerReady) {
-                        error("Docker not properly configured at ${DOCKER_CMD}")
+                        error("Docker not properly configured")
                     }
                 }
             }
@@ -54,36 +51,22 @@ pipeline {
         stage('Docker Operations') {
             steps {
                 script {
-                    // Build with explicit retry logic
-                    retry(2) {
-                        sh """
-                            ${DOCKER_CMD} build \
-                            -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
-                            --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .
-                        """
+                    // Build with absolute path
+                    sh "${DOCKER_CMD} build -t ${DOCKER_IMAGE}:${DOCKER_TAG} --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} ."
+
+                    // Push with credentials
+                    docker.withRegistry('https://registry.hub.docker.com', 'docker-hub-creds') {
+                        docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
+                        docker.image("${DOCKER_IMAGE}:latest").push()
                     }
 
-                    // Push with credential handling
-                    withCredentials([usernamePassword(
-                        credentialsId: 'docker-hub-creds',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh """
-                            ${DOCKER_CMD} login -u $DOCKER_USER -p $DOCKER_PASS
-                            ${DOCKER_CMD} push ${DOCKER_IMAGE}:${DOCKER_TAG}
-                            ${DOCKER_CMD} push ${DOCKER_IMAGE}:latest
-                        """
-                    }
-
-                    // Deployment
+                    // Deploy with health check
                     sh """
                         ${DOCKER_CMD} stop spring-boot-app || true
                         ${DOCKER_CMD} rm spring-boot-app || true
-                        ${DOCKER_CMD} run -d \
-                            --name spring-boot-app \
-                            -p 8080:8080 \
-                            ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        ${DOCKER_CMD} run -d --name spring-boot-app -p 8080:8080 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        sleep 5
+                        ${DOCKER_CMD} ps --filter name=spring-boot-app --format '{{.Status}}' | grep -q 'Up' || exit 1
                     """
                 }
             }
@@ -93,32 +76,43 @@ pipeline {
     post {
         always {
             script {
-                // Ultra-safe cleanup that cannot fail
-                try {
-                    // File cleanup
-                    sh 'rm -rf target/* || echo "Cleanup warning: Failed to remove target files"'
+                // Never-fail cleanup
+                sh """
+                    # File cleanup
+                    rm -rf target/* || echo "File cleanup warning"
 
-                    // Docker cleanup with absolute path
-                    sh """
-                        ${DOCKER_CMD} system prune -f || \
-                        echo "Cleanup warning: Docker prune failed"
-                    """
-                } catch (Exception e) {
-                    echo "Cleanup error suppressed: ${e.message}"
-                }
+                    # Docker cleanup that cannot fail
+                    ${DOCKER_CMD} system prune -f || \
+                    echo "Docker cleanup warning"
+
+                    # Final verification
+                    echo "=== Pipeline Completed ==="
+                    echo "Docker Status:"
+                    ${DOCKER_CMD} ps -a || true
+                """
             }
         }
+
         success {
-            echo "✅ SUCCESS: Application deployed to http://localhost:8080"
-            echo "📦 Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "✅ SUCCESS: All stages completed"
+            echo "🌐 Application: http://localhost:8080"
+            echo "🐳 Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
         }
+
         failure {
-            echo "❌ FAILURE: Pipeline failed - check logs"
-            // Attempt final cleanup even on failure
-            sh "${DOCKER_CMD} system prune -f || true"
+            echo "❌ FAILURE: Check specific stage logs"
+            // Additional diagnostics
+            sh """
+                echo "=== Failure Diagnostics ==="
+                ${DOCKER_CMD} version || true
+                ${DOCKER_CMD} info || true
+            """
         }
     }
 }
+
+
+
 /*
 pipeline {
     agent any
