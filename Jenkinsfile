@@ -2,6 +2,7 @@ pipeline {
     agent any
     // Use pre-installed tools (configured in Jenkins Global Tools)
     tools {
+        git 'homebrew-git'
         maven 'system-maven'
         jdk 'system-jdk'
     }
@@ -12,6 +13,7 @@ pipeline {
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
         // Ensure Docker is in PATH (Mac specific)
         PATH = "/usr/local/bin:$PATH"
+        PATH = "/opt/homebrew/bin:$PATH"
     }
     stages {
         // Stage 1: Checkout code from GitHub
