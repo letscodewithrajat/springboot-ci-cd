@@ -6,9 +6,8 @@ pipeline {
     }
 
     environment {
-        // Universal Docker access
-        DOCKER_CMD = "/usr/bin/env docker"
-        PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
+        // Absolute path to Docker (verified working location)
+        DOCKER_CMD = "/usr/local/bin/docker"
 
         // Project configuration
         MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
@@ -17,22 +16,26 @@ pipeline {
     }
 
     stages {
+        stage('Verify Environment') {
+            steps {
+                script {
+                    // Verify Docker exists at specified path
+                    sh """
+                        if [ ! -x "${DOCKER_CMD}" ]; then
+                            echo "ERROR: Docker not found at ${DOCKER_CMD}"
+                            exit 1
+                        fi
+                        ${DOCKER_CMD} --version
+                        ${DOCKER_CMD} ps >/dev/null
+                    """
+                }
+            }
+        }
+
         stage('Checkout Code') {
             steps {
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    extensions: [
-                        [$class: 'CleanCheckout'],
-                        [$class: 'CloneOption', depth: 1, shallow: true]
-                    ],
-                    userRemoteConfigs: [[
-                        url: 'https://github.com/your-username/your-repo.git',
-                        credentialsId: 'your-github-credentials'
-                    ]]
-                ])
-                // Verify checkout succeeded
-                sh 'ls -la'
+                checkout(scm)  // Uses your preconfigured SCM
+                sh 'ls -la'   // Verify files exist
             }
         }
 
@@ -44,33 +47,31 @@ pipeline {
             }
         }
 
-        stage('Docker Operations') {
+        stage('Docker Build & Push') {
             steps {
                 script {
-                    // Verify Docker is available
+                    // Build with absolute Docker path
+                    sh "${DOCKER_CMD} build -t ${DOCKER_IMAGE}:${DOCKER_TAG} --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} ."
+
+                    // Push using preconfigured Jenkins credentials
+                    docker.withRegistry('https://registry.hub.docker.com', 'docker-hub-creds') {
+                        docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
+                        docker.image("${DOCKER_IMAGE}:latest").push()
+                    }
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
                     sh """
-                        if ! command -v docker >/dev/null 2>&1; then
-                            echo "ERROR: Docker not found in PATH: \$PATH"
-                            exit 1
-                        fi
-
-                        ${DOCKER_CMD} build -t ${DOCKER_IMAGE}:${DOCKER_TAG} --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .
-
-                        withCredentials([usernamePassword(
-                            credentialsId: 'docker-hub-creds',
-                            usernameVariable: 'DOCKER_USER',
-                            passwordVariable: 'DOCKER_PASS'
-                        ]) {
-                            sh '''
-                                ${DOCKER_CMD} login -u \$DOCKER_USER -p \$DOCKER_PASS
-                                ${DOCKER_CMD} push ${DOCKER_IMAGE}:${DOCKER_TAG}
-                                ${DOCKER_CMD} push ${DOCKER_IMAGE}:latest
-
-                                ${DOCKER_CMD} stop spring-boot-app || true
-                                ${DOCKER_CMD} rm spring-boot-app || true
-                                ${DOCKER_CMD} run -d --name spring-boot-app -p 8080:8080 ${DOCKER_IMAGE}:${DOCKER_TAG}
-                            '''
-                        }
+                        ${DOCKER_CMD} stop spring-boot-app || true
+                        ${DOCKER_CMD} rm spring-boot-app || true
+                        ${DOCKER_CMD} run -d \
+                            --name spring-boot-app \
+                            -p 8080:8080 \
+                            ${DOCKER_IMAGE}:${DOCKER_TAG}
                     """
                 }
             }
@@ -79,11 +80,11 @@ pipeline {
 
     post {
         always {
-            sh '''
-                # Safe cleanup
+            // Safe cleanup that cannot fail
+            sh """
                 rm -rf target/* || echo "File cleanup warning"
                 ${DOCKER_CMD} system prune -f || echo "Docker cleanup warning"
-            '''
+            """
         }
         success {
             echo "✅ SUCCESS: Pipeline completed"
