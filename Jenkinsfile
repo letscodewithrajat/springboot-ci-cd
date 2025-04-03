@@ -10,7 +10,7 @@ pipeline {
         // Docker configuration
         MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
         DOCKER_REGISTRY = 'https://registry.hub.docker.com'
-        DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
+        DOCKER_IMAGE = 'letscodewithrajat/springboot-ci-cd'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
         // Ensure Docker is in PATH (Mac specific)
         PATH = "/usr/local/bin:$PATH:/opt/homebrew/bin:$PATH"
