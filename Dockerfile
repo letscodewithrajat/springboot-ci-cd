@@ -1,5 +1,5 @@
 # Build stage
-FROM maven:maven:3.8.7-eclipse-temurin-17 AS build
+FROM maven:3.8.7-eclipse-temurin-17 AS build
 WORKDIR /app
 COPY pom.xml .
 RUN mvn dependency:go-offline
