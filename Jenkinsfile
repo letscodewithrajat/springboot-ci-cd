@@ -1,7 +1,7 @@
 pipeline {
     agent any
     options {
-        retry(3)  // Auto-retry on transient failures
+        skipStagesAfterUnstable()
         timeout(time: 30, unit: 'MINUTES')
     }
     tools {
@@ -10,110 +10,99 @@ pipeline {
         jdk 'system-jdk'
     }
     environment {
-        // Docker configuration
         MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
         DOCKER_REGISTRY = 'https://registry.hub.docker.com'
         DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
-
-        // Path configuration (M1/M2 Mac optimized)
-        PATH = "/opt/homebrew/bin:/usr/local/bin:$PATH"
-        DOCKER_HOST = "unix:///var/run/docker.sock"
-        DOCKER_BUILDKIT = "1"  // Enable modern buildkit
+        PATH = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
     }
 
     stages {
-        // Stage 1: Verify environment
-        stage('Verify Environment') {
-            steps {
-                sh '''
-                    echo "=== Tool Versions ==="
-                    java -version
-                    mvn --version
-                    git --version
-                    docker --version
-                    echo "=== Docker Info ==="
-                    docker info
-                '''
-            }
-        }
-
-        // Stage 2: Checkout code
         stage('Checkout') {
             steps {
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    extensions: [],
-                    userRemoteConfigs: [[url: 'https://github.com/letscodewithrajat/springboot-ci-cd.git']]
-                ])
+                checkout scm
             }
         }
 
-        // Stage 3: Build and test
-        stage('Build and Test') {
+        stage('Build') {
             steps {
-                sh 'mvn clean package'
+                sh 'mvn clean package -DskipTests'
             }
             post {
                 success {
                     archiveArtifacts 'target/*.jar'
                 }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'mvn test'
+            }
+            post {
                 always {
                     junit '**/target/surefire-reports/*.xml'
                 }
             }
         }
 
-        // Stage 4: Docker operations with error handling
-        stage('Docker Operations') {
+        stage('Docker Build') {
             steps {
                 script {
-                    try {
-                        // Build image
-                        docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}", "--build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .")
+                    docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}", "--build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .")
+                }
+            }
+        }
 
-                        // Push to registry
-                        docker.withRegistry("${DOCKER_REGISTRY}", 'docker-hub-creds') {
-                            docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
-                            docker.image("${DOCKER_IMAGE}:latest").push()
-                        }
-
-                        // Deploy locally
-                        sh '''
-                            docker stop spring-boot-app || true
-                            docker rm spring-boot-app || true
-                            docker run -d \
-                                --name spring-boot-app \
-                                -p 8080:8080 \
-                                ${DOCKER_IMAGE}:${DOCKER_TAG}
-                        '''
-                    } catch (Exception e) {
-                        echo "Docker operation failed: ${e.message}"
-                        sh 'docker system prune -f || true'  // Cleanup on failure
-                        error("Docker pipeline stage failed")
+        stage('Docker Push') {
+            steps {
+                script {
+                    docker.withRegistry("${DOCKER_REGISTRY}", 'docker-hub-creds') {
+                        docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
+                        docker.image("${DOCKER_IMAGE}:latest").push()
                     }
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    sh 'docker stop spring-boot-app || true'
+                    sh 'docker rm spring-boot-app || true'
+                    sh """
+                        docker run -d \
+                        --name spring-boot-app \
+                        -p 8080:8080 \
+                        ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    """
                 }
             }
         }
     }
 
     post {
+        always {
+            echo "=== Cleanup Phase ==="
+            script {
+                // Safe cleanup that won't fail the pipeline
+                try {
+                    sh 'rm -rf target/* || true'
+                    sh 'docker system prune -f || true'
+                } catch (Exception e) {
+                    echo "Cleanup warning: ${e.message}"
+                }
+            }
+        }
         success {
             echo "✅ Pipeline SUCCESS - App running at http://localhost:8080"
-            echo "📦 Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "📦 Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
         }
         failure {
-            echo "❌ Pipeline FAILED - Check logs for errors"
-            sh 'docker system prune -f || true'  // Cleanup on failure
-        }
-        always {
-            // Optional: Add cleanup of temporary files
-            sh 'rm -rf target/* || true'
+            echo "❌ Pipeline FAILED - Check logs"
         }
     }
 }
-
 
 
 
