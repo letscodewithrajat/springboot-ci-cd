@@ -8,6 +8,7 @@ pipeline {
     }
     environment {
         // Docker configuration
+        MAVEN_IMAGE = "maven:3.8.6-jdk-17"
         DOCKER_REGISTRY = 'https://registry.hub.docker.com'
         DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
@@ -48,7 +49,7 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
+                    docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}", "--build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .")
                 }
             }
         }
