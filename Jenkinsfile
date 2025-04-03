@@ -12,8 +12,8 @@ pipeline {
         DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
         // Ensure Docker is in PATH (Mac specific)
-        PATH = "/usr/local/bin:$PATH"
-        PATH = "/opt/homebrew/bin:$PATH"
+        PATH = "/usr/local/bin:$PATH:/opt/homebrew/bin:$PATH"
+       // PATH = "/opt/homebrew/bin:$PATH"
     }
     stages {
         // Stage 1: Checkout code from GitHub
