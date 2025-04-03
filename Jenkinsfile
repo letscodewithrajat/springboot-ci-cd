@@ -3,115 +3,84 @@ pipeline {
     options {
         skipStagesAfterUnstable()
         timeout(time: 30, unit: 'MINUTES')
-        retry(2) // Retry entire pipeline on failure
+        retry(1) // Single retry for whole pipeline
     }
 
     environment {
-        // Absolute paths for macOS (both Intel and Apple Silicon)
-        DOCKER_PATH = "/usr/local/bin/docker:/opt/homebrew/bin/docker"
+        // Universal PATH configuration (works for both Intel and Apple Silicon)
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
         // Docker configuration
+        DOCKER_CMD = sh(script: 'command -v docker || echo /usr/local/bin/docker', returnStdout: true).trim()
         MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
-        DOCKER_REGISTRY = 'https://registry.hub.docker.com'
         DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
         DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
 
-        // Ensure Docker context is stable
+        // Docker stability settings
         DOCKER_HOST = "unix:///var/run/docker.sock"
         DOCKER_BUILDKIT = "1"
     }
 
     stages {
-        stage('Verify Environment') {
+        stage('Environment Prep') {
             steps {
                 script {
-                    // Verify Docker is available and responsive
-                    def dockerReady = sh(script: '''
-                        which docker || exit 1
-                        docker ps >/dev/null 2>&1 || exit 1
-                        echo "Docker ready at: $(which docker)"
-                    ''', returnStatus: true) == 0
+                    // Verify Docker exists and is responsive
+                    def dockerReady = sh(script: """
+                        ${DOCKER_CMD} --version || exit 1
+                        ${DOCKER_CMD} ps >/dev/null 2>&1 || exit 1
+                        echo "Using Docker at: ${DOCKER_CMD}"
+                    """, returnStatus: true) == 0
 
                     if (!dockerReady) {
-                        error("Docker not properly configured")
+                        error("Docker not properly configured at ${DOCKER_CMD}")
                     }
                 }
             }
         }
 
-        stage('Checkout') {
+        stage('Build & Test') {
             steps {
-                checkout scm
-            }
-        }
-
-        stage('Build') {
-            steps {
-                sh 'mvn clean package -DskipTests'
-            }
-        }
-
-        stage('Test') {
-            steps {
-                sh 'mvn test'
+                sh 'mvn clean package'
             }
             post {
                 always {
                     junit '**/target/surefire-reports/*.xml'
+                    archiveArtifacts 'target/*.jar'
                 }
             }
         }
 
-        stage('Docker Build') {
+        stage('Docker Operations') {
             steps {
                 script {
-                    try {
-                        // Explicitly use full docker path
+                    // Build with explicit retry logic
+                    retry(2) {
                         sh """
-                            /usr/local/bin/docker build \
+                            ${DOCKER_CMD} build \
                             -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
                             --build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .
                         """
-                    } catch (Exception e) {
-                        echo "Docker build failed, restarting Docker Desktop..."
-                        sh 'osascript -e "quit app \\"Docker\\"" && sleep 5 && open -a Docker && sleep 15'
-                        error("Docker build failed after restart: ${e.message}")
                     }
-                }
-            }
-        }
 
-        stage('Docker Push') {
-            steps {
-                script {
+                    // Push with credential handling
                     withCredentials([usernamePassword(
                         credentialsId: 'docker-hub-creds',
                         usernameVariable: 'DOCKER_USER',
                         passwordVariable: 'DOCKER_PASS'
                     )]) {
                         sh """
-                            # Explicit login with retry
-                            for i in {1..3}; do
-                                /usr/local/bin/docker login -u $DOCKER_USER -p $DOCKER_PASS ${DOCKER_REGISTRY} && break
-                                sleep 5
-                            done
-
-                            /usr/local/bin/docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
-                            /usr/local/bin/docker push ${DOCKER_IMAGE}:latest
+                            ${DOCKER_CMD} login -u $DOCKER_USER -p $DOCKER_PASS
+                            ${DOCKER_CMD} push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                            ${DOCKER_CMD} push ${DOCKER_IMAGE}:latest
                         """
                     }
-                }
-            }
-        }
 
-        stage('Deploy') {
-            steps {
-                script {
+                    // Deployment
                     sh """
-                        /usr/local/bin/docker stop spring-boot-app || true
-                        /usr/local/bin/docker rm spring-boot-app || true
-                        /usr/local/bin/docker run -d \
+                        ${DOCKER_CMD} stop spring-boot-app || true
+                        ${DOCKER_CMD} rm spring-boot-app || true
+                        ${DOCKER_CMD} run -d \
                             --name spring-boot-app \
                             -p 8080:8080 \
                             ${DOCKER_IMAGE}:${DOCKER_TAG}
@@ -124,25 +93,32 @@ pipeline {
     post {
         always {
             script {
-                // Safe cleanup that won't fail
-                sh '''
-                    rm -rf target/* || true
-                    docker system prune -f || true
-                '''
+                // Ultra-safe cleanup that cannot fail
+                try {
+                    // File cleanup
+                    sh 'rm -rf target/* || echo "Cleanup warning: Failed to remove target files"'
+
+                    // Docker cleanup with absolute path
+                    sh """
+                        ${DOCKER_CMD} system prune -f || \
+                        echo "Cleanup warning: Docker prune failed"
+                    """
+                } catch (Exception e) {
+                    echo "Cleanup error suppressed: ${e.message}"
+                }
             }
         }
         success {
-            echo "✅ SUCCESS: App running at http://localhost:8080"
-            echo "📦 Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "✅ SUCCESS: Application deployed to http://localhost:8080"
+            echo "📦 Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
         }
         failure {
-            echo "❌ FAILURE: Pipeline failed at ${currentBuild.currentResult}"
-            sh 'docker system prune -f || true'
+            echo "❌ FAILURE: Pipeline failed - check logs"
+            // Attempt final cleanup even on failure
+            sh "${DOCKER_CMD} system prune -f || true"
         }
     }
 }
-
-
 /*
 pipeline {
     agent any
