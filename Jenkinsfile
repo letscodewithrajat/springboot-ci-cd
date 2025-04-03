@@ -1,5 +1,126 @@
 pipeline {
     agent any
+    options {
+        retry(3)  // Auto-retry on transient failures
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    tools {
+        git 'homebrew-git'
+        maven 'system-maven'
+        jdk 'system-jdk'
+    }
+    environment {
+        // Docker configuration
+        MAVEN_IMAGE = "maven:3.8.7-eclipse-temurin-17"
+        DOCKER_REGISTRY = 'https://registry.hub.docker.com'
+        DOCKER_IMAGE = 'letscodewithrajat/spring-boot-demo'
+        DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+
+        // Path configuration (M1/M2 Mac optimized)
+        PATH = "/opt/homebrew/bin:/usr/local/bin:$PATH"
+        DOCKER_HOST = "unix:///var/run/docker.sock"
+        DOCKER_BUILDKIT = "1"  // Enable modern buildkit
+    }
+
+    stages {
+        // Stage 1: Verify environment
+        stage('Verify Environment') {
+            steps {
+                sh '''
+                    echo "=== Tool Versions ==="
+                    java -version
+                    mvn --version
+                    git --version
+                    docker --version
+                    echo "=== Docker Info ==="
+                    docker info
+                '''
+            }
+        }
+
+        // Stage 2: Checkout code
+        stage('Checkout') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    extensions: [],
+                    userRemoteConfigs: [[url: 'https://github.com/letscodewithrajat/springboot-ci-cd.git']]
+                ])
+            }
+        }
+
+        // Stage 3: Build and test
+        stage('Build and Test') {
+            steps {
+                sh 'mvn clean package'
+            }
+            post {
+                success {
+                    archiveArtifacts 'target/*.jar'
+                }
+                always {
+                    junit '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        // Stage 4: Docker operations with error handling
+        stage('Docker Operations') {
+            steps {
+                script {
+                    try {
+                        // Build image
+                        docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}", "--build-arg MAVEN_IMAGE=${MAVEN_IMAGE} .")
+
+                        // Push to registry
+                        docker.withRegistry("${DOCKER_REGISTRY}", 'docker-hub-creds') {
+                            docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
+                            docker.image("${DOCKER_IMAGE}:latest").push()
+                        }
+
+                        // Deploy locally
+                        sh '''
+                            docker stop spring-boot-app || true
+                            docker rm spring-boot-app || true
+                            docker run -d \
+                                --name spring-boot-app \
+                                -p 8080:8080 \
+                                ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        '''
+                    } catch (Exception e) {
+                        echo "Docker operation failed: ${e.message}"
+                        sh 'docker system prune -f || true'  // Cleanup on failure
+                        error("Docker pipeline stage failed")
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline SUCCESS - App running at http://localhost:8080"
+            echo "📦 Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+        }
+        failure {
+            echo "❌ Pipeline FAILED - Check logs for errors"
+            sh 'docker system prune -f || true'  // Cleanup on failure
+        }
+        always {
+            // Optional: Add cleanup of temporary files
+            sh 'rm -rf target/* || true'
+        }
+    }
+}
+
+
+
+
+
+/*
+pipeline {
+    agent any
     // Use pre-installed tools (configured in Jenkins Global Tools)
     tools {
         git 'homebrew-git'
@@ -30,7 +151,8 @@ pipeline {
             }
             post {
                 success {
-                    archiveArtifacts 'target/*.jar'
+                    archiveArtifacts 'target */
+/*.jar'
                 }
             }
         }
@@ -41,7 +163,9 @@ pipeline {
             }
             post {
                 always {
-                    junit '**/target/surefire-reports/*.xml'
+                    junit '**//*
+target/surefire-reports */
+/*.xml'
                 }
             }
         }
@@ -97,4 +221,4 @@ pipeline {
             cleanWs()
         }
     }
-}
+} */
